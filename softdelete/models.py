@@ -3,8 +3,8 @@ from __future__ import unicode_literals
 import django
 
 from django.conf import settings
-from django.db.models import query
-from django.db import models
+from django.db.models import query, OneToOneRel
+from django.db import models, transaction
 from django.core.exceptions import ObjectDoesNotExist
 from django.contrib.contenttypes.models import ContentType
 try:
@@ -96,13 +96,15 @@ class SoftDeleteManager(models.Manager):
     def get_query_set(self):
         qs = super(SoftDeleteManager, self).get_query_set().filter(
             deleted_at__isnull=True)
-        qs.__class__ = SoftDeleteQuerySet
+        if not issubclass(qs.__class__, SoftDeleteQuerySet):
+            qs.__class__ = SoftDeleteQuerySet
         return qs
 
     def get_queryset(self):
         qs = super(SoftDeleteManager, self).get_queryset().filter(
             deleted_at__isnull=True)
-        qs.__class__ = SoftDeleteQuerySet
+        if not issubclass(qs.__class__, SoftDeleteQuerySet):
+            qs.__class__ = SoftDeleteQuerySet
         return qs
 
     def all_with_deleted(self, prt=False):
@@ -110,12 +112,14 @@ class SoftDeleteManager(models.Manager):
             qs = self._get_base_queryset().filter(**self.core_filters)
         else:
             qs = self._get_base_queryset()
-        qs.__class__ = SoftDeleteQuerySet
+        if not issubclass(qs.__class__, SoftDeleteQuerySet):
+            qs.__class__ = SoftDeleteQuerySet
         return qs
 
     def deleted_set(self):
-        qs = self._get_base_queryset().filter(deleted_at__isnull=0)
-        qs.__class__ = SoftDeleteQuerySet
+        qs = self._get_base_queryset().filter(deleted_at__isnull=False)
+        if not issubclass(qs.__class__, SoftDeleteQuerySet):
+            qs.__class__ = SoftDeleteQuerySet
         return qs
 
     def get(self, *args, **kwargs):
@@ -129,7 +133,8 @@ class SoftDeleteManager(models.Manager):
             qs = self.all_with_deleted().filter(*args, **kwargs)
         else:
             qs = self._get_self_queryset().filter(*args, **kwargs)
-        qs.__class__ = SoftDeleteQuerySet
+        if not issubclass(qs.__class__, SoftDeleteQuerySet):
+            qs.__class__ = SoftDeleteQuerySet
         return qs
 
 
@@ -186,6 +191,10 @@ class SoftDeleteObject(models.Model):
                 except:
                     getattr(self, rel).__class__.objects.all().delete()
 
+    @transaction.atomic
+    def hard_delete(self, *args, **kwargs):
+        super(SoftDeleteObject, self).delete(*args, **kwargs)
+
     def delete(self, *args, **kwargs):
         if self.deleted_at:
             logging.debug("HARD DELETEING type %s, %s", type(self), self)
@@ -228,10 +237,20 @@ class SoftDeleteObject(models.Model):
             all_related = [
                 f for f in self._meta.get_fields()
                 if (f.one_to_many or f.one_to_one)
-                and f.auto_created and not f.concrete
+                   and f.auto_created and not f.concrete
             ]
+
             for x in all_related:
-                self._do_delete(cs, x)
+                if x.on_delete.__name__ not in ['DO_NOTHING', 'SET_NULL']:
+                    self._do_delete(cs, x)
+                if x.on_delete.__name__ == 'SET_NULL':
+                    rel = x.get_accessor_name()
+                    if isinstance(x, OneToOneRel):
+                        if not getattr(self, rel, None):
+                            continue
+                        setattr(getattr(self, rel), x.remote_field.name, None)
+                    else:
+                        getattr(self, rel).all().update(**{x.remote_field.name: None})
             logging.debug("FINISHED SOFT DELETING RELATED %s", self)
             models.signals.post_delete.send(sender=self.__class__,
                                             instance=self,
@@ -266,6 +285,9 @@ class SoftDeleteObject(models.Model):
                 self.delete()
 
 class ChangeSet(models.Model):
+    id = models.BigAutoField(
+        auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
+    )    
     created_date = models.DateTimeField(default=timezone.now)
     content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
     object_id = models.CharField(max_length=100)
@@ -298,6 +320,9 @@ class ChangeSet(models.Model):
     content = property(get_content, set_content)
 
 class SoftDeleteRecord(models.Model):
+    id = models.BigAutoField(
+        auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
+    )    
     changeset = models.ForeignKey(
         ChangeSet,
         related_name='soft_delete_records',
