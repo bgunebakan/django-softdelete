@@ -183,13 +183,21 @@ class SoftDeleteObject(models.Model):
                 getattr(self, rel).all().delete(changeset=changeset)
         except:
             try:
-                getattr(self, rel).all().delete()
-            except:
-                try:
-                    getattr(self, rel).__class__.objects.all().delete(
-                        changeset=changeset)
-                except:
-                    getattr(self, rel).__class__.objects.all().delete()
+                if related.one_to_one:
+                    getattr(self, rel).delete()
+                else:
+                    getattr(self, rel).all().delete()
+            except Exception as e:
+                if getattr(settings, "SOFTDELETE_CASCADE_ALLOW_DELETE_ALL", True):
+                    # fallback to delete all objects in the related field's model class
+                    # to maintain previous behaviour (before setting was added)
+                    try:
+                        getattr(self, rel).__class__.objects.all().delete(
+                            changeset=changeset)
+                    except:
+                        getattr(self, rel).__class__.objects.all().delete()
+                else:
+                    raise e
 
     @transaction.atomic
     def hard_delete(self, *args, **kwargs):
@@ -219,7 +227,7 @@ class SoftDeleteObject(models.Model):
                 except:
                     pass
         else:
-            using = kwargs.get('using', settings.DATABASES['default'])
+            using = kwargs.get('using', 'default')
             models.signals.pre_delete.send(sender=self.__class__,
                                            instance=self,
                                            using=using)
@@ -239,18 +247,36 @@ class SoftDeleteObject(models.Model):
                 if (f.one_to_many or f.one_to_one)
                    and f.auto_created and not f.concrete
             ]
+            
+            all_generic_relations = [
+                f
+                for f in self._meta.get_fields()
+                if (f.one_to_many or f.one_to_one)
+                and hasattr(f, "reverse_related_fields")
+                and not f.concrete
+            ]
+
+            for generic_relation in all_generic_relations:
+                related_objects = generic_relation.bulk_related_objects(
+                    [self], using=using
+                )
+                for related_object in related_objects:
+                    related_object.delete()
 
             for x in all_related:
                 if x.on_delete.__name__ not in ['DO_NOTHING', 'SET_NULL']:
                     self._do_delete(cs, x)
                 if x.on_delete.__name__ == 'SET_NULL':
-                    rel = x.get_accessor_name()
+                    related_name = x.get_accessor_name()
                     if isinstance(x, OneToOneRel):
-                        if not getattr(self, rel, None):
+                        if getattr(self, related_name, None) is None:
                             continue
-                        setattr(getattr(self, rel), x.remote_field.name, None)
+                        related = getattr(self, related_name)
+                        if isinstance(related, models.Model):
+                            setattr(related, x.remote_field.name, None)
+                            related.save(update_fields=[x.remote_field.name])
                     else:
-                        getattr(self, rel).all().update(**{x.remote_field.name: None})
+                        getattr(self, related_name).all().update(**{x.remote_field.name: None})
             logging.debug("FINISHED SOFT DELETING RELATED %s", self)
             models.signals.post_delete.send(sender=self.__class__,
                                             instance=self,
@@ -287,15 +313,15 @@ class SoftDeleteObject(models.Model):
 class ChangeSet(models.Model):
     id = models.BigAutoField(
         auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
-    )    
+    )
     created_date = models.DateTimeField(default=timezone.now)
     content_type = models.ForeignKey(ContentType, on_delete=models.CASCADE)
     object_id = models.CharField(max_length=100)
     record = GenericForeignKey('content_type', 'object_id')
 
     class Meta:
-        index_together = [
-            ("content_type", "object_id"),
+        indexes = [
+            models.Index(fields=["content_type", "object_id"]),
         ]
 
     def get_content(self):
@@ -322,7 +348,7 @@ class ChangeSet(models.Model):
 class SoftDeleteRecord(models.Model):
     id = models.BigAutoField(
         auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
-    )    
+    )
     changeset = models.ForeignKey(
         ChangeSet,
         related_name='soft_delete_records',
@@ -335,8 +361,8 @@ class SoftDeleteRecord(models.Model):
 
     class Meta:
         unique_together = (('changeset', 'content_type', 'object_id'),)
-        index_together = [
-            ("content_type", "object_id"),
+        indexes = [
+            models.Index(fields=["content_type", "object_id"]),
         ]
 
     def get_content(self):

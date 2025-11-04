@@ -1,11 +1,27 @@
 from django.db import models
 from django.contrib import admin
+from django.db.models import QuerySet
+
 from softdelete.models import *
 from softdelete.admin import *
+from softdelete.test_softdelete_app.exceptions import ModelDeletionException
+from django.contrib.contenttypes.models import ContentType
+try:
+    from django.contrib.contenttypes.fields import GenericRelation, GenericForeignKey
+except ImportError:
+    from django.contrib.contenttypes.generic import GenericRelation, GenericForeignKey
 
 
 class TestModelOne(SoftDeleteObject):
     extra_bool = models.BooleanField(default=False)
+
+class TestGenericForeignKey(SoftDeleteObject):
+    content_type = models.ForeignKey(ContentType, on_delete=models.SET_NULL, null=True)
+    object_id = models.CharField(max_length=255, null=True)
+    generic_relation = GenericForeignKey("content_type", "object_id")
+
+class TestGenericRelation(SoftDeleteObject):
+    generic_relations = GenericRelation("ProjectRiskModel")
 
 
 class TestModelTwoCascade(SoftDeleteObject):
@@ -32,6 +48,17 @@ class TestModelTwoSetNull(SoftDeleteObject):
         TestModelOne,
         on_delete=models.SET_NULL,
         related_name='tmsn',
+        null=True,
+        blank=True
+    )
+
+
+class TestModelTwoSetNullOneToOne(SoftDeleteObject):
+    extra_int = models.IntegerField()
+    tmo = models.OneToOneField(
+        TestModelOne,
+        on_delete=models.SET_NULL,
+        related_name='tmsno',
         null=True,
         blank=True
     )
@@ -75,6 +102,27 @@ class TestModelO2OFemaleCascade(SoftDeleteObject):
         TestModelBaseO2OMale,
         related_name='one_to_one_cascade',
         on_delete=models.CASCADE,
+    )
+
+
+class TestModelO2OFemaleCascadeErrorOnDelete(models.Model):
+    name = models.CharField(max_length=16)
+    link = models.OneToOneField(
+        TestModelBaseO2OMale,
+        related_name='one_to_one_cascade_error_on_delete',
+        on_delete=models.CASCADE,
+    )
+
+    def delete(self, using=None, keep_parents=False):
+        raise ModelDeletionException("Preventing deletion!")
+
+
+class TestModelO2OFemaleCascadeNoSD(models.Model):
+    name = models.CharField(max_length=16)
+    link = models.OneToOneField(
+        TestModelBaseO2OMale,
+        related_name='one_to_one_cascade_no_sd',
+        on_delete=models.CASCADE
     )
 
 

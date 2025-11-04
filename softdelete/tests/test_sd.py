@@ -1,10 +1,26 @@
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
-from django.test import TestCase, Client
+from django.test import TestCase, Client, override_settings
 from django.contrib.auth.models import User
 from django.db import models
-from softdelete.test_softdelete_app.models import TestModelOne, TestModelTwoCascade, TestModelThree, TestModelThrough, \
-    TestModelTwoDoNothing, TestModelTwoSetNull, TestModelO2OFemaleSetNull, TestModelBaseO2OMale, TestModelO2OFemaleCascade
+from django.contrib.contenttypes.models import ContentType
+from softdelete.test_softdelete_app.exceptions import ModelDeletionException
+from softdelete.test_softdelete_app.models import (
+    TestModelOne,
+    TestModelTwoCascade,
+    TestModelThree,
+    TestModelThrough,
+    TestModelTwoDoNothing,
+    TestModelTwoSetNull,
+    TestModelTwoSetNullOneToOne,
+    TestModelO2OFemaleSetNull,
+    TestModelBaseO2OMale,
+    TestModelO2OFemaleCascade,
+    TestModelO2OFemaleCascadeNoSD,
+    TestModelO2OFemaleCascadeErrorOnDelete,
+    TestGenericRelation,
+    TestGenericForeignKey,
+)
 from softdelete.tests.constanats import TEST_MODEL_ONE_COUNT, TEST_MODEL_TWO_TOTAL_COUNT, TEST_MODEL_THREE_COUNT, \
     TEST_MODEL_TWO_LIST, TEST_MODEL_TWO_CASCADE_COUNT, TEST_MODEL_TWO_SET_NULL_COUNT, TEST_MODEL_TWO_DO_NOTHING_COUNT
 from softdelete.models import *
@@ -200,6 +216,42 @@ class DeleteTest(BaseTest):
                                            ), SoftDeleteRecord.objects.count())
         self._posttest()
 
+    def test_set_null_on_one_to_one(self):
+        """
+        Make sure reverse `OneToOne` fields are set to `None` upon soft delete.
+
+        When an instance is soft deleted and other instances have a `OneToOne`
+        relation to this instance with `on_delete=SET_NULL`, the other
+        instances should have their relation set to `None`.
+        """
+        # Create two instances, one with a relation to the other.
+        to_be_deleted = TestModelOne.objects.create()
+        other_with_relation = TestModelTwoSetNullOneToOne.objects.create(
+            tmo=to_be_deleted,
+            extra_int=0,
+        )
+
+        # Make sure the relation is there before soft deleting.
+        self.assertEqual(other_with_relation.tmo, to_be_deleted)
+
+        # Then delete the instance and expect the relation from the other
+        # instance is now `None`.
+        to_be_deleted.delete()
+        other_with_relation.refresh_from_db()
+        self.assertIsNone(other_with_relation.tmo)
+
+    def test_delete_generic_relation(self):
+        test_generic_relation = TestGenericRelation.objects.create()
+        test_generic_foreign_key = TestGenericForeignKey.objects.create(
+            content_type=ContentType.objects.get_for_model(TestGenericRelation),
+            object_id=test_generic_relation.pk,
+        )
+        test_generic_relation.delete()
+        test_generic_foreign_key.refresh_from_db()
+        test_generic_relation.refresh_from_db()
+        self.assertIsNotNone(test_generic_relation.deleted_at)
+        self.assertIsNotNone(test_generic_foreign_key.deleted_at)
+
 
 class AdminTest(BaseTest):
     def test_admin(self):
@@ -367,3 +419,35 @@ class SoftDeleteRelatedFieldLookupsTests(BaseTest):
 
         self.assertRaises(TestModelO2OFemaleCascade.DoesNotExist, TestModelO2OFemaleCascade.objects.get, name='Juliet')
         self.assertEquals(juliet.deleted, True)
+
+        kurt = TestModelBaseO2OMale.objects.create(name='Kurt')
+        courtney = TestModelO2OFemaleCascadeNoSD.objects.create(name='Courtney', link=kurt)
+        jack = TestModelBaseO2OMale.objects.create(name='Jack')
+        jill = TestModelO2OFemaleCascadeNoSD.objects.create(name='jill', link=jack)
+
+        kurt.delete()
+
+        self.assertTrue(TestModelO2OFemaleCascadeNoSD.objects.filter(id=jill.id).exists())
+        self.assertFalse(TestModelO2OFemaleCascadeNoSD.objects.filter(id=courtney.id).exists())
+
+    @override_settings(SOFTDELETE_CASCADE_ALLOW_DELETE_ALL=True)
+    def test_fallback_delete_all_setting_false(self):
+        bob = TestModelBaseO2OMale.objects.create(name='Bob')
+        TestModelO2OFemaleCascadeErrorOnDelete.objects.create(name='Alice', link=bob)
+
+        romeo = TestModelBaseO2OMale.objects.create(name='Romeo')
+        TestModelO2OFemaleCascadeErrorOnDelete.objects.create(name='Juliet', link=romeo)
+
+        self.assertFalse(TestModelO2OFemaleCascadeErrorOnDelete.objects.all().exists())
+
+    @override_settings(SOFTDELETE_CASCADE_ALLOW_DELETE_ALL=False)
+    def test_fallback_delete_all_setting_false(self):
+        bob = TestModelBaseO2OMale.objects.create(name='Bob')
+        alice = TestModelO2OFemaleCascadeErrorOnDelete.objects.create(name='Alice', link=bob)
+
+        romeo = TestModelBaseO2OMale.objects.create(name='Romeo')
+        TestModelO2OFemaleCascadeErrorOnDelete.objects.create(name='Juliet', link=romeo)
+
+        self.assertRaises(ModelDeletionException, alice.delete)
+        self.assertTrue(TestModelO2OFemaleCascadeErrorOnDelete.objects.filter(id=alice.id).exists())
+        self.assertEquals(TestModelO2OFemaleCascadeErrorOnDelete.objects.count(), 2)
